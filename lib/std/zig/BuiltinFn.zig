@@ -93,6 +93,7 @@ pub const Tag = enum {
     splat,
     reduce,
     src,
+    caller_src,
     sqrt,
     sin,
     cos,
@@ -818,6 +819,14 @@ pub const list = list: {
             .{
                 .tag = .src,
                 .needs_mem_loc = .always,
+                .param_count = 0,
+                .illegal_outside_function = true,
+            },
+        },
+        .{
+            "@callerSrc",
+            .{
+                .tag = .caller_src,
                 .param_count = 0,
                 .illegal_outside_function = true,
             },

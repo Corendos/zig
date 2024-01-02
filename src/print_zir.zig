@@ -537,6 +537,7 @@ const Writer = struct {
             .c_va_start,
             .in_comptime,
             .value_placeholder,
+            .builtin_caller_src,
             => try self.writeExtNode(stream, extended),
 
             .builtin_src => {

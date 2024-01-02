@@ -1230,6 +1230,7 @@ fn analyzeBodyInner(
                     .this               => try sema.zirThis(              block, extended),
                     .ret_addr           => try sema.zirRetAddr(           block, extended),
                     .builtin_src        => try sema.zirBuiltinSrc(        block, extended),
+                    .builtin_caller_src => try sema.zirBuiltinCallerSrc(  block, extended),
                     .error_return_trace => try sema.zirErrorReturnTrace(  block),
                     .frame              => try sema.zirFrame(             block, extended),
                     .frame_address      => try sema.zirFrameAddress(      block, extended),
@@ -16870,6 +16871,119 @@ fn zirBuiltinSrc(
         // column: u32,
         (try mod.intValue(Type.u32, extra.column + 1)).toIntern(),
     };
+    return Air.internedToRef((try mod.intern(.{ .aggregate = .{
+        .ty = src_loc_ty.toIntern(),
+        .storage = .{ .elems = &fields },
+    } })));
+}
+
+fn zirBuiltinCallerSrc(
+    sema: *Sema,
+    block: *Block,
+    extended: Zir.Inst.Extended.InstData,
+) CompileError!Air.Inst.Ref {
+    _ = extended;
+    _ = block;
+
+    const mod = sema.mod;
+    const ip = &mod.intern_pool;
+    const gpa = sema.gpa;
+
+    // Declare default values for the case where we are not able to retrieve caller location.
+    var filename: []const u8 = "<unknown>";
+    var function_name: []const u8 = "<unknown>";
+    var line: usize = 0;
+    var column: usize = 0;
+
+    const referenced_by = if (sema.owner_func_index != .none)
+        mod.funcOwnerDeclIndex(sema.owner_func_index)
+    else
+        sema.owner_decl_index;
+
+    // Try to get our caller block.
+    if (mod.reference_table.get(referenced_by)) |caller| ref: {
+        // Retrieve the assocaited declaration.
+        const decl = mod.declPtr(caller.referencer);
+
+        // Get the function name
+        // NOTE(Corentin,@Hack): This might not be a function but SourceLocation is expecting a function name.
+        function_name = try sema.arena.dupe(u8, ip.stringToSlice(decl.name));
+
+        // Get the file name
+        const file_scope = decl.getFileScope(mod);
+        filename = try file_scope.fullPathZ(sema.arena);
+
+        // Load or get the file source.
+        const file_source = file_scope.getSource(gpa) catch break :ref;
+
+        // Retrieve the location of the Decl as a Span.
+        const source_loc = caller.src.toSrcLoc(decl, mod);
+        const source_span = source_loc.span(gpa) catch break :ref;
+
+        // Compute the associated line and columm.
+        const reference_location = std.zig.findLineColumn(file_source.bytes, source_span.main);
+
+        // Update the line and column values.
+        line = reference_location.line + 1;
+        column = reference_location.column + 1;
+    }
+
+    // Produce the SourceLocation
+    const func_name_val = v: {
+        // This dupe prevents InternPool string pool memory from being reallocated
+        // while a reference exists.
+        const bytes = function_name;
+        const array_ty = try ip.get(gpa, .{ .array_type = .{
+            .len = bytes.len,
+            .sentinel = .zero_u8,
+            .child = .u8_type,
+        } });
+        break :v try ip.get(gpa, .{ .ptr = .{
+            .ty = .slice_const_u8_sentinel_0_type,
+            .len = (try mod.intValue(Type.usize, bytes.len)).toIntern(),
+            .addr = .{ .anon_decl = .{
+                .orig_ty = .slice_const_u8_sentinel_0_type,
+                .val = try ip.get(gpa, .{ .aggregate = .{
+                    .ty = array_ty,
+                    .storage = .{ .bytes = bytes },
+                } }),
+            } },
+        } });
+    };
+
+    const file_name_val = v: {
+        // The compiler must not call realpath anywhere.
+        const bytes = filename;
+        const array_ty = try ip.get(gpa, .{ .array_type = .{
+            .len = bytes.len,
+            .sentinel = .zero_u8,
+            .child = .u8_type,
+        } });
+        break :v try ip.get(gpa, .{ .ptr = .{
+            .ty = .slice_const_u8_sentinel_0_type,
+            .len = (try mod.intValue(Type.usize, bytes.len)).toIntern(),
+            .addr = .{ .anon_decl = .{
+                .orig_ty = .slice_const_u8_sentinel_0_type,
+                .val = try ip.get(gpa, .{ .aggregate = .{
+                    .ty = array_ty,
+                    .storage = .{ .bytes = bytes },
+                } }),
+            } },
+        } });
+    };
+
+    const src_loc_ty = try sema.getBuiltinType("SourceLocation");
+    const fields = .{
+        // file: [:0]const u8,
+        file_name_val,
+        // fn_name: [:0]const u8,
+        func_name_val,
+        // line: u32,
+        (try mod.intValue(Type.u32, line)).toIntern(),
+        // column: u32,
+        (try mod.intValue(Type.u32, column)).toIntern(),
+    };
+
     return Air.internedToRef((try mod.intern(.{ .aggregate = .{
         .ty = src_loc_ty.toIntern(),
         .storage = .{ .elems = &fields },

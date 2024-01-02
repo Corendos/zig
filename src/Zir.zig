@@ -1920,6 +1920,9 @@ pub const Inst = struct {
         /// Implements the `@src` builtin.
         /// `operand` is payload index to `LineColumn`.
         builtin_src,
+        /// Implements the `@callerSrc` builtin.
+        /// `operand` is `src_node: i32`.
+        builtin_caller_src,
         /// Implements the `@errorReturnTrace` builtin.
         /// `operand` is `src_node: i32`.
         error_return_trace,
