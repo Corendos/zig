@@ -16889,104 +16889,84 @@ fn zirBuiltinCallerSrc(
     const ip = &mod.intern_pool;
     const gpa = sema.gpa;
 
-    // Declare default values for the case where we are not able to retrieve caller location.
-    var filename: []const u8 = "<unknown>";
-    var function_name: []const u8 = "<unknown>";
-    var line: usize = 0;
-    var column: usize = 0;
-
-    const referenced_by = if (sema.owner_func_index != .none)
+    var referenced_by = if (sema.owner_func_index != .none)
         mod.funcOwnerDeclIndex(sema.owner_func_index)
     else
         sema.owner_decl_index;
 
-    // Try to get our caller block.
-    if (mod.reference_table.get(referenced_by)) |caller| ref: {
-        // Retrieve the assocaited declaration.
-        const decl = mod.declPtr(caller.referencer);
+    // This will contain the interned SourceLocation values.
+    var reference_stack = std.ArrayList(InternPool.Index).init(gpa);
+    defer reference_stack.deinit();
+
+    // Avoid infinite loops.
+    var seen = std.AutoHashMap(InternPool.DeclIndex, void).init(gpa);
+    defer seen.deinit();
+
+    const src_loc_ty = try sema.getBuiltinType("SourceLocation");
+
+    // Iterate blocks references.
+    while (mod.reference_table.get(referenced_by)) |ref| {
+        const gop = try seen.getOrPut(ref.referencer);
+        // Break if we have a loop.
+        if (gop.found_existing) break;
+
+        // Retrieve the associated declaration.
+        const decl = mod.declPtr(ref.referencer);
 
         // Get the function name
         // NOTE(Corentin,@Hack): This might not be a function but SourceLocation is expecting a function name.
-        function_name = try sema.arena.dupe(u8, ip.stringToSlice(decl.name));
+        const function_name = try sema.arena.dupeZ(u8, ip.stringToSlice(decl.name));
 
         // Get the file name
         const file_scope = decl.getFileScope(mod);
-        filename = try file_scope.fullPathZ(sema.arena);
+        const filename = try file_scope.fullPathZ(sema.arena);
 
-        // Load or get the file source.
-        const file_source = file_scope.getSource(gpa) catch break :ref;
+        // Get the associated line and column.
+        const line, const column = b: {
+            // Load or get the file source.
+            const file_source = file_scope.getSource(gpa) catch break :b .{ 0, 0 };
 
-        // Retrieve the location of the Decl as a Span.
-        const source_loc = caller.src.toSrcLoc(decl, mod);
-        const source_span = source_loc.span(gpa) catch break :ref;
+            // Retrieve the location of the Decl as a Span.
+            const source_loc = ref.src.toSrcLoc(decl, mod);
+            const source_span = source_loc.span(gpa) catch break :b .{ 0, 0 };
 
-        // Compute the associated line and columm.
-        const reference_location = std.zig.findLineColumn(file_source.bytes, source_span.main);
+            // Compute the associated line and columm.
+            const reference_location = std.zig.findLineColumn(file_source.bytes, source_span.main);
 
-        // Update the line and column values.
-        line = reference_location.line + 1;
-        column = reference_location.column + 1;
+            const line = reference_location.line + 1;
+            const column = reference_location.column + 1;
+            break :b .{ line, column };
+        };
+
+        // Append the interned SourceLocation to the stack.
+        const fields = .{
+            // file: [:0]const u8,
+            try ip.getOrPutStringExtern(gpa, filename),
+            // fn_name: [:0]const u8,
+            try ip.getOrPutStringExtern(gpa, function_name),
+            // line: u32,
+            (try mod.intValue(Type.u32, line)).toIntern(),
+            // column: u32,
+            (try mod.intValue(Type.u32, column)).toIntern(),
+        };
+
+        try reference_stack.append(try mod.intern(.{ .aggregate = .{
+            .ty = src_loc_ty.toIntern(),
+            .storage = .{ .elems = &fields },
+        } }));
+
+        referenced_by = ref.referencer;
     }
 
-    // Produce the SourceLocation
-    const func_name_val = v: {
-        // This dupe prevents InternPool string pool memory from being reallocated
-        // while a reference exists.
-        const bytes = function_name;
-        const array_ty = try ip.get(gpa, .{ .array_type = .{
-            .len = bytes.len,
-            .sentinel = .zero_u8,
-            .child = .u8_type,
-        } });
-        break :v try ip.get(gpa, .{ .ptr = .{
-            .ty = .slice_const_u8_sentinel_0_type,
-            .len = (try mod.intValue(Type.usize, bytes.len)).toIntern(),
-            .addr = .{ .anon_decl = .{
-                .orig_ty = .slice_const_u8_sentinel_0_type,
-                .val = try ip.get(gpa, .{ .aggregate = .{
-                    .ty = array_ty,
-                    .storage = .{ .bytes = bytes },
-                } }),
-            } },
-        } });
-    };
-
-    const file_name_val = v: {
-        // The compiler must not call realpath anywhere.
-        const bytes = filename;
-        const array_ty = try ip.get(gpa, .{ .array_type = .{
-            .len = bytes.len,
-            .sentinel = .zero_u8,
-            .child = .u8_type,
-        } });
-        break :v try ip.get(gpa, .{ .ptr = .{
-            .ty = .slice_const_u8_sentinel_0_type,
-            .len = (try mod.intValue(Type.usize, bytes.len)).toIntern(),
-            .addr = .{ .anon_decl = .{
-                .orig_ty = .slice_const_u8_sentinel_0_type,
-                .val = try ip.get(gpa, .{ .aggregate = .{
-                    .ty = array_ty,
-                    .storage = .{ .bytes = bytes },
-                } }),
-            } },
-        } });
-    };
-
-    const src_loc_ty = try sema.getBuiltinType("SourceLocation");
-    const fields = .{
-        // file: [:0]const u8,
-        file_name_val,
-        // fn_name: [:0]const u8,
-        func_name_val,
-        // line: u32,
-        (try mod.intValue(Type.u32, line)).toIntern(),
-        // column: u32,
-        (try mod.intValue(Type.u32, column)).toIntern(),
-    };
+    // Return the stack as an array.
+    const locations_ty = try mod.arrayType(.{
+        .len = reference_stack.items.len,
+        .child = src_loc_ty.toIntern(),
+    });
 
     return Air.internedToRef((try mod.intern(.{ .aggregate = .{
-        .ty = src_loc_ty.toIntern(),
-        .storage = .{ .elems = &fields },
+        .ty = locations_ty.toIntern(),
+        .storage = .{ .elems = try reference_stack.toOwnedSlice() },
     } })));
 }
 

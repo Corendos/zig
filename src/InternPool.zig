@@ -7692,6 +7692,28 @@ pub fn getOrPutStringOpt(
     return interned.toOptional();
 }
 
+pub fn getOrPutStringExtern(ip: *InternPool, gpa: Allocator, s: []const u8) Allocator.Error!Index {
+    const array_ty = try ip.get(gpa, .{ .array_type = .{
+        .len = s.len,
+        .sentinel = .zero_u8,
+        .child = .u8_type,
+    } });
+    return try ip.get(gpa, .{ .ptr = .{
+        .ty = .slice_const_u8_sentinel_0_type,
+        .len = try ip.get(gpa, .{ .int = .{
+            .ty = .usize_type,
+            .storage = .{ .u64 = s.len },
+        } }),
+        .addr = .{ .anon_decl = .{
+            .orig_ty = .slice_const_u8_sentinel_0_type,
+            .val = try ip.get(gpa, .{ .aggregate = .{
+                .ty = array_ty,
+                .storage = .{ .bytes = s },
+            } }),
+        } },
+    } });
+}
+
 /// Uses the last len bytes of ip.string_bytes as the key.
 pub fn getOrPutTrailingString(
     ip: *InternPool,
